@@ -5,9 +5,8 @@ const nextConfig = {
   images: {
     unoptimized: true,  // Required for static export
   },
-  // If deploying to https://username.github.io/workout-tracker
-  // Uncomment the line below and replace with your repo name:
-  // basePath: '/workout-tracker',
+  // Deploying to https://zaint10.github.io/workout-tracker
+  basePath: '/workout-tracker',
 };
 
 module.exports = nextConfig;
