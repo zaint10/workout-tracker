@@ -1,25 +1,29 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
 import { AppData, Exercise, Workout, WorkoutType, MuscleGroup, BodyWeightEntry, WorkoutEntry } from '@/types';
 import {
-  loadData,
-  addExercise as addExerciseToStorage,
-  updateExercise as updateExerciseInStorage,
-  deleteExercise as deleteExerciseFromStorage,
-  startWorkout as startWorkoutInStorage,
-  updateWorkout as updateWorkoutInStorage,
-  completeWorkout as completeWorkoutInStorage,
-  getLastWorkout,
-  addBodyWeight as addBodyWeightToStorage,
-  deleteBodyWeight as deleteBodyWeightFromStorage,
-  getLatestBodyWeight,
-  resetData as resetDataInStorage,
-} from '@/lib/storage';
+  loadData as loadHybridData,
+  addExercise as addExerciseHybrid,
+  updateExercise as updateExerciseHybrid,
+  deleteExercise as deleteExerciseHybrid,
+  startWorkout as startWorkoutHybrid,
+  completeWorkout as completeWorkoutHybrid,
+  cancelWorkout as cancelWorkoutHybrid,
+  addBodyWeight as addBodyWeightHybrid,
+  deleteBodyWeight as deleteBodyWeightHybrid,
+  resetData as resetDataHybrid,
+  syncPendingToSupabase,
+  isOnline,
+  hasPendingSync,
+  getPendingSyncCount,
+} from '@/lib/hybrid-storage';
 
 interface AppContextType {
   data: AppData | null;
   isLoading: boolean;
+  isOnline: boolean;
+  pendingSyncCount: number;
   
   // Exercise operations
   addExercise: (exercise: Omit<Exercise, 'id' | 'createdAt' | 'updatedAt'>) => void;
@@ -46,6 +50,12 @@ interface AppContextType {
 
   // Reset data
   resetData: () => void;
+  
+  // Refresh data from server
+  refreshData: () => Promise<void>;
+  
+  // Manual sync
+  syncNow: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -66,29 +76,83 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [data, setData] = useState<AppData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [currentWorkout, setCurrentWorkout] = useState<Workout | null>(null);
+  const [online, setOnline] = useState(true);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+
+  const updateSyncStatus = useCallback(() => {
+    setOnline(isOnline());
+    setPendingSyncCount(getPendingSyncCount());
+  }, []);
+
+  const loadData = async () => {
+    try {
+      const loadedData = await loadHybridData();
+      setData(loadedData);
+      updateSyncStatus();
+    } catch (error) {
+      console.error('Error loading data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const loadedData = loadData();
-    setData(loadedData);
-    setIsLoading(false);
-  }, []);
+    loadData();
+    
+    // Listen for online/offline changes
+    const handleOnline = () => {
+      setOnline(true);
+      // Try to sync when coming back online
+      syncPendingToSupabase().then(() => {
+        updateSyncStatus();
+        loadData(); // Reload to get latest from Supabase
+      });
+    };
+    
+    const handleOffline = () => {
+      setOnline(false);
+    };
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [updateSyncStatus]);
+
+  const refreshData = async () => {
+    setIsLoading(true);
+    await loadData();
+  };
+
+  const syncNow = async () => {
+    if (isOnline()) {
+      await syncPendingToSupabase();
+      await loadData();
+    }
+  };
 
   const addExercise = (exercise: Omit<Exercise, 'id' | 'createdAt' | 'updatedAt'>) => {
     if (!data) return;
-    const newData = addExerciseToStorage(data, exercise);
+    const newData = addExerciseHybrid(data, exercise);
     setData(newData);
+    updateSyncStatus();
   };
 
   const updateExercise = (exerciseId: string, updates: Partial<Exercise>) => {
     if (!data) return;
-    const newData = updateExerciseInStorage(data, exerciseId, updates);
+    const newData = updateExerciseHybrid(data, exerciseId, updates);
     setData(newData);
+    updateSyncStatus();
   };
 
   const deleteExercise = (exerciseId: string) => {
     if (!data) return;
-    const newData = deleteExerciseFromStorage(data, exerciseId);
+    const newData = deleteExerciseHybrid(data, exerciseId);
     setData(newData);
+    updateSyncStatus();
   };
 
   const getExercisesByType = (type: WorkoutType): Exercise[] => {
@@ -105,47 +169,37 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
   const startWorkout = (type: WorkoutType) => {
     if (!data) return;
-    const { data: newData, workout } = startWorkoutInStorage(data, type);
+    const { data: newData, workout } = startWorkoutHybrid(data, type);
     setData(newData);
     setCurrentWorkout(workout);
   };
 
   const updateCurrentWorkout = (updates: Partial<Workout>) => {
-    if (!data || !currentWorkout) return;
-    const newData = updateWorkoutInStorage(data, currentWorkout.id, updates);
-    setData(newData);
+    if (!currentWorkout) return;
     setCurrentWorkout({ ...currentWorkout, ...updates });
   };
 
   const completeCurrentWorkout = (entries?: WorkoutEntry[]) => {
     if (!data || !currentWorkout) return;
-    
-    // First update the workout with entries if provided
-    let dataWithEntries = data;
-    if (entries && entries.length > 0) {
-      dataWithEntries = updateWorkoutInStorage(data, currentWorkout.id, { entries });
-    }
-    
-    // Then complete the workout using the updated data
-    const newData = completeWorkoutInStorage(dataWithEntries, currentWorkout.id);
+    const workoutEntries = entries || [];
+    const newData = completeWorkoutHybrid(data, currentWorkout.id, workoutEntries);
     setData(newData);
     setCurrentWorkout(null);
+    updateSyncStatus();
   };
 
   const cancelWorkout = () => {
     if (!data || !currentWorkout) return;
-    // Remove incomplete workout
-    const newData = {
-      ...data,
-      workouts: data.workouts.filter((w) => w.id !== currentWorkout.id),
-    };
+    const newData = cancelWorkoutHybrid(data, currentWorkout.id);
     setData(newData);
     setCurrentWorkout(null);
   };
 
   const getLastWorkoutByType = (type: WorkoutType): Workout | null => {
     if (!data) return null;
-    return getLastWorkout(data, type);
+    const lastWorkoutId = type === 'pull' ? data.lastPullWorkoutId : data.lastPushWorkoutId;
+    if (!lastWorkoutId) return null;
+    return data.workouts.find((w) => w.id === lastWorkoutId) || null;
   };
 
   const getExerciseById = (id: string): Exercise | undefined => {
@@ -155,21 +209,35 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
   const addBodyWeight = (weight: number, date?: string) => {
     if (!data) return;
-    const newData = addBodyWeightToStorage(data, weight, date);
+    const newData = addBodyWeightHybrid(data, weight, date);
     setData(newData);
+    updateSyncStatus();
   };
 
   const deleteBodyWeight = (entryId: string) => {
     if (!data) return;
-    const newData = deleteBodyWeightFromStorage(data, entryId);
+    const newData = deleteBodyWeightHybrid(data, entryId);
     setData(newData);
+    updateSyncStatus();
   };
 
-  const latestBodyWeight = data ? getLatestBodyWeight(data) : null;
+  const latestBodyWeight = data?.bodyWeightHistory?.length
+    ? data.bodyWeightHistory.reduce((latest, entry) =>
+        new Date(entry.date) > new Date(latest.date) ? entry : latest
+      )
+    : null;
 
-  const resetData = () => {
-    const newData = resetDataInStorage();
-    setData(newData);
+  const resetData = async () => {
+    try {
+      setIsLoading(true);
+      const newData = await resetDataHybrid();
+      setData(newData);
+      updateSyncStatus();
+    } catch (error) {
+      console.error('Error resetting data:', error);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -177,6 +245,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       value={{
         data,
         isLoading,
+        isOnline: online,
+        pendingSyncCount,
         addExercise,
         updateExercise,
         deleteExercise,
@@ -193,6 +263,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         deleteBodyWeight,
         latestBodyWeight,
         resetData,
+        refreshData,
+        syncNow,
       }}
     >
       {children}

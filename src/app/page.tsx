@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Dumbbell, RotateCcw, Calendar } from 'lucide-react';
+import { Dumbbell, RotateCcw, Calendar, Wifi, WifiOff, Cloud, RefreshCw } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { WorkoutCard } from '@/components/WorkoutCard';
 import { ActiveWorkout } from '@/components/ActiveWorkout';
@@ -19,8 +19,9 @@ const getTodayFormatted = (): string => {
 };
 
 export default function Home() {
-  const { isLoading, currentWorkout, startWorkout, resetData, getLastWorkoutByType } = useApp();
+  const { isLoading, currentWorkout, startWorkout, resetData, getLastWorkoutByType, isOnline, pendingSyncCount, syncNow } = useApp();
   const [view, setView] = useState<'home' | 'workout'>('home');
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const handleStartWorkout = (type: WorkoutType) => {
     startWorkout(type);
@@ -39,6 +40,13 @@ export default function Home() {
     if (confirm('Reset all data to defaults? This will clear all your workout history but restore your exercise list with your recorded weights.')) {
       resetData();
     }
+  };
+
+  const handleSync = async () => {
+    if (!isOnline || isSyncing) return;
+    setIsSyncing(true);
+    await syncNow();
+    setIsSyncing(false);
   };
 
   if (isLoading) {
@@ -78,13 +86,41 @@ export default function Home() {
               </div>
             </div>
           </div>
-          <button
-            onClick={handleReset}
-            className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition"
-            title="Reset to defaults"
-          >
-            <RotateCcw className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Sync Status Indicator */}
+            {!isOnline ? (
+              <div className="flex items-center gap-1 px-2 py-1 bg-amber-100 text-amber-700 rounded-lg text-xs">
+                <WifiOff className="w-3 h-3" />
+                <span>Offline</span>
+                {pendingSyncCount > 0 && (
+                  <span className="bg-amber-500 text-white px-1.5 rounded-full text-xs">
+                    {pendingSyncCount}
+                  </span>
+                )}
+              </div>
+            ) : pendingSyncCount > 0 ? (
+              <button
+                onClick={handleSync}
+                disabled={isSyncing}
+                className="flex items-center gap-1 px-2 py-1 bg-blue-100 text-blue-700 rounded-lg text-xs hover:bg-blue-200 transition"
+              >
+                <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>{isSyncing ? 'Syncing...' : `Sync (${pendingSyncCount})`}</span>
+              </button>
+            ) : (
+              <div className="flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 rounded-lg text-xs">
+                <Cloud className="w-3 h-3" />
+                <span>Synced</span>
+              </div>
+            )}
+            <button
+              onClick={handleReset}
+              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition"
+              title="Reset to defaults"
+            >
+              <RotateCcw className="w-5 h-5" />
+            </button>
+          </div>
         </div>
       </header>
 
